@@ -1,0 +1,1262 @@
+# Nine qubit code simulator. Based on Leonardo & Dripto's code
+# Not assuming ion trap can do two gates at the same time
+
+import numpy as np
+import sys
+
+# this code requires the following branch of the quantumsim package:
+# https://github.com/quantumsim/quantumsim/tree/enh/ion_trap_gates
+import quantumsim as qs
+
+# CONSTANTS USED THROUGHOUT THE PROGRAM
+
+if len(sys.argv) < 5:
+    exit("At least five arguments necessary.")
+
+measurement_selected = False
+
+# Select two sets of stabilizers to measure
+if sys.argv[1] == "XY":
+    MEASURING_X = True
+    MEASURING_Y = True
+    MEASURING_Z = False
+    measurement_selected = True
+if sys.argv[1] == "XZ":
+    MEASURING_X = True
+    MEASURING_Y = False
+    MEASURING_Z = True
+    measurement_selected = True
+if sys.argv[1] == "YZ":
+    MEASURING_X = False
+    MEASURING_Y = True
+    MEASURING_Z = True
+    measurement_selected = True
+
+if measurement_selected == False:
+    exit("First argument must be XY, XZ, or YZ")
+
+# Asymmetric error probabilities
+P_X = float(sys.argv[2])
+P_Y = float(sys.argv[3])
+P_Z = float(sys.argv[4])
+
+P2D = float(sys.argv[5])
+ETA = float(sys.argv[6])
+EPS = float(sys.argv[7])
+KAPPA = float(sys.argv[8])
+
+READOUT_ERROR = float(sys.argv[9])
+
+# This is zero when the preparation is perfect
+PERFECT_PREP = float(sys.argv[10])
+
+NUMBER_OF_RUNS = int(sys.argv[11])
+
+T2 = float(sys.argv[12])
+
+TIME_1QUBIT_GATE = 10e-6
+TIME_2QUBIT_GATE = 100.*TIME_1QUBIT_GATE
+
+# One random seed per stabilizer and per code qubit
+seeds = np.random.choice(2**32-1, size=6+7)
+
+# Look up tables for each sequence of measurement results:
+if MEASURING_Z and MEASURING_X:
+    lookup_table = {
+        "000000":"IIIIIII", #  1
+        #ZZZXXX   1234567 - all single-qubit Z errors
+        "000001":"IIIIIIZ", #  2
+        "000010":"IIIIZII", #  3
+        "000011":"IIIIIZI", #  4
+        "000100":"ZIIIIII", #  5
+        "000101":"IIIZIII", #  6
+        "000110":"IZIIIII", #  7
+        "000111":"IIZIIII", #  8
+        #ZZZXXX   1234567 - all single-qubit X errors
+        "001000":"IIIIIIX", #  9
+        "010000":"IIIIXII", # 10
+        "011000":"IIIIIXI", # 11
+        "100000":"XIIIIII", # 12
+        "101000":"IIIXIII", # 13
+        "110000":"IXIIIII", # 14
+        "111000":"IIXIIII", # 15
+        #ZZZXXX   1234567 - all single-qubit Y errors
+        "001001":"IIIIIIY", # 16
+        "010010":"IIIIYII", # 17
+        "011011":"IIIIIYI", # 18
+        "100100":"YIIIIII", # 19
+        "101101":"IIIYIII", # 20
+        "110110":"IYIIIII", # 21
+        "111111":"IIYIIII", # 22
+        #ZZZXXX   1234567 - all weight-two erros with one X and one Z
+        "001010":"IIIIZIX", # 23
+        "001100":"ZIIIIIX", # 24
+        "010001":"IIIIXIZ", # 25
+        "010100":"ZIIIXII", # 26
+        "100001":"XIIIIIZ", # 27
+        "100010":"XIIIZII", # 28
+        # All weight-two errors with one Z and one Y.
+        # For each of these errors there is an equivalent error with one X and
+        # one Z. However, if we're measuring ZZZZ and XXXX, we're assuming that
+        # the probability of p_y is higher than the probability of p_x, so it
+        # makes more sense to fix a Y error.
+        #ZZZXXX   1234567
+        "001011":"IIIIZIY", # 29
+        "001101":"ZIIIIIY", # 30
+        "001111":"IZIIIIY", # 31
+        "010011":"IIIIYIZ", # 32
+        "010110":"ZIIIYII", # 33
+        "010111":"IIIZYII", # 34
+        "100101":"YIIIIIZ", # 35
+        "100110":"YIIIZII", # 36
+        "100111":"YIIIIZI", # 37
+        #ZZZXXX   1234567
+        "011111":"ZIIIIYI", # 38
+        "101111":"IIIYZII", # 39
+        "110111":"IYIIIIZ", # 40
+        # All weight-two errors with one X and one Y.
+        # Same logic from above applies.
+        #ZZZXXX   1234567
+        "011001":"IIIIXIY", # 41
+        "101001":"XIIIIIY", # 42
+        "111001":"IXIIIIY", # 43
+        "011010":"IIIIYIX", # 44
+        "110010":"XIIIYII", # 45
+        "111010":"IIIXYII", # 46
+        "101100":"YIIIIIX", # 47
+        "110100":"YIIIXII", # 48
+        "111100":"YIIIIXI", # 49
+        #ZZZXXX   1234567
+        "111110":"IYIIIIX", # 50
+        "111101":"IIIYXII", # 51
+        "111011":"XIIIIYI", # 52
+        # One X and one Z, with no weight two-error equivalent with Y.
+        #ZZZXXX   1234567
+        "011101":"IIIZIXI", # 53
+        "011110":"IZIIIXI", # 54
+        "101011":"IIIXIZI", # 55
+        "101110":"IZIXIII", # 56
+        "110011":"IXIIIZI", # 57
+        "110101":"IXIZIII", # 58
+        "001110":"IZIIIIX", # 59
+        "010101":"IIIZXII", # 60
+        "100011":"XIIIIZI", # 61
+        "110001":"IXIIIIZ", # 62
+        "101010":"IIIXZII", # 63
+        "011100":"ZIIIIXI"  # 64
+    }
+
+if MEASURING_Z and MEASURING_Y:
+    lookup_table = {
+        "000000":"IIIIIII", #  1
+        #ZZZYYY   1234567 - all single-qubit Z errors
+        "000001":"IIIIIIZ", #  2
+        "000010":"IIIIZII", #  3
+        "000011":"IIIIIZI", #  4
+        "000100":"ZIIIIII", #  5
+        "000101":"IIIZIII", #  6
+        "000110":"IZIIIII", #  7
+        "000111":"IIZIIII", #  8
+        #ZZZYYY-   1234567 - all single-qubit Y errors
+        "001000":"IIIIIIY", #  9
+        "010000":"IIIIYII", # 10
+        "011000":"IIIIIYI", # 11
+        "100000":"YIIIIII", # 12
+        "101000":"IIIYIII", # 13
+        "110000":"IYIIIII", # 14
+        "111000":"IIYIIII", # 15
+        #ZZZYYY   1234567 - all single-qubit X errors
+        "001001":"IIIIIIX", # 16
+        "010010":"IIIIXII", # 17
+        "011011":"IIIIIXI", # 18
+        "100100":"XIIIIII", # 19
+        "101101":"IIIXIII", # 20
+        "110110":"IXIIIII", # 21
+        "111111":"IIXIIII", # 22
+        #ZZZYYY   1234567 - all weight-two erros with one Y and one Z
+        "001010":"IIIIZIY", # 23
+        "001100":"ZIIIIIY", # 24
+        "010001":"IIIIYIZ", # 25
+        "010100":"ZIIIYII", # 26
+        "100001":"YIIIIIZ", # 27
+        "100010":"YIIIZII", # 28
+        # All weight-two errors with one Z and one X.
+        # For each of these errors there is an equivalent error with one Y and
+        # one Z. However, if we're measuring ZZZZ and YYYY, we're assuming that
+        # the probability of p_x is higher than the probability of p_y, so it
+        # makes more sense to fix a X error.
+        #ZZZYYY   1234567
+        "001011":"IIIIZIX", # 29
+        "001101":"ZIIIIIX", # 30
+        "001111":"IZIIIIX", # 31
+        "010011":"IIIIXIZ", # 32
+        "010110":"ZIIIXII", # 33
+        "010111":"IIIZXII", # 34
+        "100101":"XIIIIIZ", # 35
+        "100110":"XIIIZII", # 36
+        "100111":"XIIIIZI", # 37
+        #ZZZYYY   1234567
+        "011111":"ZIIIIXI", # 38
+        "101111":"IIIXZII", # 39
+        "110111":"IXIIIIZ", # 40
+        # All weight-two errors with one Y and one X.
+        # Same logic from above applies.
+        #ZZZYYY   1234567
+        "011001":"IIIIYIX", # 41
+        "101001":"YIIIIIX", # 42
+        "111001":"IYIIIIX", # 43
+        "011010":"IIIIXIY", # 44
+        "110010":"YIIIXII", # 45
+        "111010":"IIIYXII", # 46
+        "101100":"XIIIIIY", # 47
+        "110100":"XIIIYII", # 48
+        "111100":"XIIIIYI", # 49
+        #ZZZYYY   1234567
+        "111110":"IXIIIIY", # 50
+        "111101":"IIIXYII", # 51
+        "111011":"YIIIIXI", # 52
+        # One Z and one Y, with no weight two-error equivalent with X.
+        #ZZZYYY   1234567
+        "011101":"IIIZIYI", # 53
+        "011110":"IZIIIYI", # 54
+        "101011":"IIIYIZI", # 55
+        "101110":"IZIYIII", # 56
+        "110011":"IYIIIZI", # 57
+        "110101":"IYIZIII", # 58
+        "001110":"IZIIIIY", # 59
+        "010101":"IIIZYII", # 60
+        "100011":"YIIIIZI", # 61
+        "110001":"IYIIIIZ", # 62
+        "101010":"IIIYZII", # 63
+        "011100":"ZIIIIYI"  # 64
+    }
+
+
+if MEASURING_X and MEASURING_Y:
+    lookup_table = {
+        "000000":"IIIIIII", #  1
+        #XXXYYY   1234567 - all single-qubit X errors
+        "000001":"IIIIIIX", #  2
+        "000010":"IIIIXII", #  3
+        "000011":"IIIIIXI", #  4
+        "000100":"XIIIIII", #  5
+        "000101":"IIIXIII", #  6
+        "000110":"IXIIIII", #  7
+        "000111":"IIXIIII", #  8
+        #XXXYYY   1234567 - all single-qubit Y errors
+        "001000":"IIIIIIY", #  9
+        "010000":"IIIIYII", # 10
+        "011000":"IIIIIYI", # 11
+        "100000":"YIIIIII", # 12
+        "101000":"IIIYIII", # 13
+        "110000":"IYIIIII", # 14
+        "111000":"IIYIIII", # 15
+        #XXXYYY   1234567 - all single-qubit Z errors
+        "001001":"IIIIIIZ", # 16
+        "010010":"IIIIZII", # 17
+        "011011":"IIIIIZI", # 18
+        "100100":"ZIIIIII", # 19
+        "101101":"IIIZIII", # 20
+        "110110":"IZIIIII", # 21
+        "111111":"IIZIIII", # 22
+        #XXXYYY   1234567 - all weight-two erros with one X and one Y
+        "001010":"IIIIXIY", # 23
+        "001100":"XIIIIIY", # 24
+        "010001":"IIIIYIX", # 25
+        "010100":"XIIIYII", # 26
+        "100001":"YIIIIIX", # 27
+        "100010":"YIIIXII", # 28
+        # All weight-two errors with one X and one Z.
+        # For each of these errors there is an equivalent error with one Y and
+        # one X. However, if we're measuring XXXX and YYYY, we're assuming that
+        # the probability of p_z is higher than the probability of p_y, so it
+        # makes more sense to fix the Z error.
+        #XXXYYY   1234567
+        "001011":"IIIIXIZ", # 29
+        "001101":"XIIIIIZ", # 30
+        "001111":"IXIIIIZ", # 31
+        "010011":"IIIIZIX", # 32
+        "010110":"XIIIZII", # 33
+        "010111":"IIIXZII", # 34
+        "100101":"ZIIIIIX", # 35
+        "100110":"ZIIIXII", # 36
+        "100111":"ZIIIIXI", # 37
+        #XXXYYY   1234567
+        "011111":"XIIIIZI", # 38
+        "101111":"IIIZXII", # 39
+        "110111":"IZIIIIX", # 40
+        # All weight-two errors with one Y and one Z.
+        # Same logic from above applies.
+        #XXXYYY   1234567
+        "011001":"IIIIYIZ", # 41
+        "101001":"YIIIIIZ", # 42
+        "111001":"IYIIIIZ", # 43
+        "011010":"IIIIZIY", # 44
+        "110010":"YIIIZII", # 45
+        "111010":"IIIYZII", # 46
+        "101100":"ZIIIIIY", # 47
+        "110100":"ZIIIYII", # 48
+        "111100":"ZIIIIYI", # 49
+        #XXXYYY   1234567
+        "111110":"IZIIIIY", # 50
+        "111101":"IIIZYII", # 51
+        "111011":"YIIIIZI", # 52
+        # One X and one Y, with no weight two-error equivalent with Z.
+        #XXXYYY   1234567
+        "011101":"IIIXIYI", # 53
+        "011110":"IXIIIYI", # 54
+        "101011":"IIIYIXI", # 55
+        "101110":"IXIYIII", # 56
+        "110011":"IYIIIXI", # 57
+        "110101":"IYIXIII", # 58
+        "001110":"IXIIIIY", # 59
+        "010101":"IIIXYII", # 60
+        "100011":"YIIIIXI", # 61
+        "110001":"IYIIIIX", # 62
+        "101010":"IIIYXII", # 63
+        "011100":"XIIIIYI"  # 64
+    }
+
+# tEnd stores the complete duration of the quantum computation
+# This will vary depending on the choice of stabilizers
+tEnd = 9.*TIME_2QUBIT_GATE + 10.*TIME_1QUBIT_GATE # duration of preparation
+
+if MEASURING_Z:
+    tEnd += 3*(4.*TIME_2QUBIT_GATE+12.*TIME_1QUBIT_GATE) # duration of 3 ZZZZ
+
+if MEASURING_X:
+    tEnd += 3*(4.*TIME_2QUBIT_GATE+4.*TIME_1QUBIT_GATE) # duration of 3 XXXX
+
+if MEASURING_Y:
+    tEnd += 3*(4.*TIME_2QUBIT_GATE+12.*TIME_1QUBIT_GATE) # duration of 3 YYYY
+
+# CIRCUITS
+
+# Dummy Qubit Circuit
+# The Steane code has seven data qubits.
+# I will be numbering them following Shilin's convention
+code_qubits = ["D1", "D2", "D3", "D4", "D5", "D6", "D7"]
+
+c = qs.circuit.Circuit(title="qubits")
+for qb in code_qubits:
+    c.add_qubit(qb)
+c.add_qubit("A")
+c.add_qubit("M")
+
+for qb in code_qubits:
+    c.add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+        qb,
+        time=0,
+        px=P_X*PERFECT_PREP,
+        py=P_Y*PERFECT_PREP,
+        pz=P_Z*PERFECT_PREP
+    ))
+
+c.order()
+
+# Encoding Circuit
+# The encoding for the Steane code works by applying H to qubits 1, 5, and 7
+# and then applying CNOTs between the following pairs: (1,2), (1,3), (1,4);
+# (5,2), (5,3), (5,6); and (7,3), (7,4), (7,6).
+# Following Maslov's compilation, we can write an H gate as an X gate and a
+# -pi/2 Y rotation. Likewise, the CNOT can be written as +pi/2 Y rotation
+# of the control qubit, a +pi/2 XX rotation, -pi/2 X rotations of both qubits,
+# and a -pi/2 Y rotation of the control.
+# All the Y rotations cancel out, except the final one.
+# The X rotations commute with each other and with the XX gate, so we only need
+# to apply one resulting X rotation in the end.
+# Therefore, the final encoding circuit becomes:
+# XX between 1 and 2, 1 and 3, and 1 and 4
+# XX between 5 and 2, 5 and 3, and 5 and 6
+# XX between 7 and 3, 7 and 4, and 7 and 6
+# X gate on qubits 2, 4, and 6,
+# R_X(+pi/2) on qubit 3
+# R_X(-pi/2) on qubits 1, 5, and 7
+# R_Y(-pi/2) on qubits 1, 5, and 7.
+
+p = qs.circuit.Circuit(title="prep")
+for qb in code_qubits:
+    p.add_qubit(qb, t2=((1.-PERFECT_PREP) * T2))
+p.add_qubit("A", t2=((1.-PERFECT_PREP) * T2))
+p.add_qubit("M")
+
+# This stores the pairs of qubits that will undergo XX
+prep_XX = [["D1", "D2"], ["D1", "D3"], ["D1", "D4"],
+           ["D5", "D2"], ["D5", "D3"], ["D5", "D6"],
+           ["D7", "D3"], ["D7", "D4"], ["D7", "D6"]]
+
+# This stores the angle of the X rotation in each of the qubits
+angle_X = [ -np.pi/2., np.pi, np.pi/2., np.pi, -np.pi/2., np.pi, -np.pi/2. ]
+
+# All nine XX gates
+t = TIME_2QUBIT_GATE/2.
+for qb in prep_XX:
+    angle_XX = np.pi/4.
+    # Stark shift
+    p.add_gate(qs.circuit.overZ(
+        qb[0],
+        time=t,
+        theta=ETA*TIME_2QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    p.add_gate(qs.circuit.overZ(
+        qb[1],
+        time=t,
+        theta=ETA*TIME_2QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    p.add_gate(qs.circuit.overZ(
+        qb[0],
+        time=t+4e-6,
+        theta=ETA*TIME_2QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    p.add_gate(qs.circuit.overZ(
+        qb[1],
+        time=t+4e-6,
+        theta=ETA*TIME_2QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    # Moelmer-Soerensen and overrotation
+    p.add_gate(qs.circuit.XX(qb[0], qb[1], time=t+1e-6, chi=angle_XX))
+    p.add_gate(qs.circuit.overXX(
+        qb[0],
+        qb[1],
+        time=t+2e-6,
+        theta=EPS*PERFECT_PREP*angle_XX,
+        kappa=KAPPA
+    ))
+    # Noise channel
+    p.add_gate(qs.circuit.TwoDepolarizingGate(
+        qb[0],
+        qb[1],
+        time=t+3e-6,
+        p=P2D*PERFECT_PREP
+    ))
+    t += TIME_2QUBIT_GATE
+
+# X rotations of angle -pi/2 applied to all seven qubits
+t = 9*TIME_2QUBIT_GATE + TIME_1QUBIT_GATE/2.
+i = 0
+for qb in code_qubits:
+    # Stark shift
+    p.add_gate(qs.circuit.overZ(
+        qb,
+        time=t,
+        theta=ETA*TIME_1QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    p.add_gate(qs.circuit.overZ(
+        qb,
+        time=t+5e-6,
+        theta=ETA*TIME_1QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    # X rotation, with overrotation
+    p.add_gate(qs.circuit.RotateX(qb, time=t+2e-6, angle=angle_X[i]))
+    p.add_gate(qs.circuit.overX(
+        qb,
+        time=t+3e-6,
+        theta=EPS*PERFECT_PREP*angle_X[i],
+        kappa=KAPPA
+    ))
+    # Noise channel
+    p.add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+        qb,
+        time=t+4e-6,
+        px=P_X*PERFECT_PREP,
+        py=P_Y*PERFECT_PREP,
+        pz=P_Z*PERFECT_PREP
+    ))
+    t += TIME_1QUBIT_GATE
+    i += 1
+
+# Y rotations of angle -pi/2 on qubits 1, 5, and 7
+t = 9.*TIME_2QUBIT_GATE + 7.*TIME_1QUBIT_GATE + TIME_1QUBIT_GATE/2.
+for qb in ["D1", "D5", "D7"]:
+    angle_Y = -np.pi/2.
+    # Stark shift
+    p.add_gate(qs.circuit.overZ(
+        qb,
+        time=t,
+        theta=ETA*TIME_1QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    p.add_gate(qs.circuit.overZ(
+        qb,
+        time=t+5e-6,
+        theta=ETA*TIME_1QUBIT_GATE*PERFECT_PREP,
+        kappa=KAPPA
+    ))
+    # Y rotation, with overrotation
+    p.add_gate(qs.circuit.RotateY(qb, time=t+2e-6, angle=angle_Y))
+    p.add_gate(qs.circuit.overY(
+        qb,
+        time=t+3e-6,
+        theta=EPS*PERFECT_PREP*(angle_Y),
+        kappa=KAPPA
+    ))
+    # Noise channel
+    p.add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+        qb,
+        time=t+4e-6,
+        px=P_X*PERFECT_PREP,
+        py=P_Y*PERFECT_PREP,
+        pz=P_Z*PERFECT_PREP
+    ))
+    t += TIME_1QUBIT_GATE
+
+p.order()
+
+t_prep_end = 9.*TIME_2QUBIT_GATE + 10.*TIME_1QUBIT_GATE
+
+p.add_waiting_gates(tmin=0., tmax=t_prep_end, only_qubits=code_qubits)
+
+# Stabilizer Circuits
+# As the three stabilizers of each family are analogous, I'll use a single loop
+# to create each family. The list of qubits below stores which qubits are in
+# each plaquette.
+
+stabilizers = [["D1", "D2", "D3", "D4"],
+               ["D2", "D3", "D5", "D6"],
+               ["D3", "D4", "D6", "D7"]]
+
+# ZZZZ Stabilizers
+# The Steane code has three ZZZZ stabilizers. They can be implemented by 4 CNOTs
+# between the data qubits and the ancilla, which, in Maslov's compilation,
+# becomes:
+# +pi/2 Y rotations applied to all data qubits
+# XX applied between each of the data qubits and the ancilla
+# -pi/2 X rotation applied to all data qubits
+# -pi/2 Y applied to all data qubits
+
+# This array stores the three ZZZZ stabilizers
+if MEASURING_Z:
+    cZ = []
+
+    t_previous_circuit = t_prep_end
+
+    for stabilizer in stabilizers:
+        i = len(cZ)
+
+        cZ.append(qs.circuit.Circuit(
+            title="Z"+stabilizer[0]+stabilizer[1]+stabilizer[2]+stabilizer[3]
+        ))
+
+        for qb in code_qubits:
+            cZ[i].add_qubit(qb, t2=T2)
+        cZ[i].add_qubit("A", t2=T2)
+        cZ[i].add_qubit("M")
+
+        # Noise for the ancilla
+        cZ[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+            "A",
+            time=0.,
+            px=P_X,
+            py=P_Y,
+            pz=P_Z
+        ))
+
+        # +pi/2 Y rotations for all the data qubits involved in this stabilizer
+        t = t_previous_circuit + TIME_1QUBIT_GATE/2.
+        for qb in stabilizer:
+            # Stark shift
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+5e-6,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # Y rotation and overrotation
+            cZ[i].add_gate(qs.circuit.RotateY(qb, time=t+2e-6, angle=np.pi/2.))
+            cZ[i].add_gate(qs.circuit.overY(
+                qb,
+                time=t+3e-6,
+                theta=EPS*(np.pi/2.),
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cZ[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+                qb,
+                time=t+4e-6,
+                px=P_X,
+                py=P_Y,
+                pz=P_Z
+            ))
+            t += TIME_1QUBIT_GATE
+
+        # XX rotations between the qubits of the stabilizer and the ancilla
+        t = t_previous_circuit + 4*TIME_1QUBIT_GATE + TIME_2QUBIT_GATE/2.
+        for qb in stabilizer:
+            # Stark shift
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cZ[i].add_gate(qs.circuit.overZ(
+                "A",
+                time=t,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+4e-6,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cZ[i].add_gate(qs.circuit.overZ(
+                "A",
+                time=t+4-6,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # XX rotation and overrotation
+            cZ[i].add_gate(qs.circuit.XX(qb, "A", time=t+1e-6, chi=np.pi/4.))
+            cZ[i].add_gate(qs.circuit.overXX(
+                qb,
+                "A",
+                time=t+2e-6,
+                theta=EPS*np.pi/4.,
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cZ[i].add_gate(qs.circuit.TwoDepolarizingGate(
+                qb,
+                "A",
+                time=t+3e-6,
+                p=P2D
+            ))
+            t += TIME_2QUBIT_GATE
+
+        # -pi/2 X rotation on all code qubits
+        t = (
+            t_previous_circuit
+            + 4.*TIME_2QUBIT_GATE
+            + 4.*TIME_1QUBIT_GATE
+            + TIME_1QUBIT_GATE/2.
+        )
+        for qb in stabilizer:
+            # Stark shift
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+5e-6,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # X rotation and overrotation
+            cZ[i].add_gate(qs.circuit.RotateX(qb,time=t+2e-6,angle=-np.pi/2.))
+            cZ[i].add_gate(qs.circuit.overX(
+                qb,
+                time=t+3e-6,
+                theta=EPS*(-np.pi/2.),
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cZ[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+                qb,
+                time=t+4e-6,
+                px=P_X,
+                py=P_Y,
+                pz=P_Z
+            ))
+            t += TIME_1QUBIT_GATE
+
+        # -pi/2 Y rotation on all code qubits
+        t = (
+            t_previous_circuit
+            + 4.*TIME_2QUBIT_GATE
+            + 8.*TIME_1QUBIT_GATE
+            + TIME_1QUBIT_GATE/2.
+        )
+        for qb in stabilizer:
+            # Stark shift
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cZ[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+5e-6,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # Y rotation and overrotation
+            cZ[i].add_gate(qs.circuit.RotateY(qb,time=t+2e-6,angle=-np.pi/2.))
+            cZ[i].add_gate(qs.circuit.overY(
+                qb,
+                time=t+3e-6,
+                theta=EPS*(-np.pi/2.),
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cZ[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+                qb,
+                time=t+4e-6,
+                px=P_X,
+                py=P_Y,
+                pz=P_Z
+            ))
+            t += TIME_1QUBIT_GATE
+
+        t = t_previous_circuit + 4.*TIME_2QUBIT_GATE + 12.*TIME_1QUBIT_GATE
+
+        tmindict={
+            stabilizer[0]: t_previous_circuit,
+            stabilizer[1]: t_previous_circuit,
+            stabilizer[2]: t_previous_circuit,
+            stabilizer[3]: t_previous_circuit,
+            "A": 0.
+        }
+
+        tmaxdict={
+            stabilizer[0]: t,
+            stabilizer[1]: t,
+            stabilizer[2]: t,
+            stabilizer[3]: t,
+            "A": tEnd
+        }
+
+        cZ[i].order()
+
+        cZ[i].add_waiting_gates(
+            tmin=tmindict,
+            tmax=tmaxdict,
+            only_qubits=[
+                stabilizer[0], stabilizer[1],
+                stabilizer[2], stabilizer[3], "A"
+            ]
+        )
+
+        sampler = qs.circuit.uniform_noisy_sampler(
+            readout_error=READOUT_ERROR,
+            seed=seeds[i]
+        )
+        cZ[i].add_measurement("A", time=tEnd, sampler=sampler)
+
+        t_previous_circuit = t
+
+    t_ZZZZ_end = t_previous_circuit
+
+# XXXX Stabilizers
+# The XXXX stabilizer is equivalent to applying a Hadamard to the ancilla,
+# one CNOT from the ancilla to each of the measured qubits, and then another
+# Hadamard to the ancilla.
+# After Maslov-style compilation, this becomes equivalent to an MS gate between
+# each of the measured qubits and the ancilla, followed by a -pi/2 X rotation
+# in all the measured qubits.
+
+if MEASURING_X:
+    cX = []
+
+    t_previous_circuit = t_prep_end
+    if MEASURING_Z:
+        t_previous_circuit = t_ZZZZ_end
+
+    for stabilizer in stabilizers:
+        i = len(cX)
+
+        cX.append(qs.circuit.Circuit(
+            title="X"+stabilizer[0]+stabilizer[1]+stabilizer[2]+stabilizer[3]
+        ))
+
+        for qb in code_qubits:
+            cX[i].add_qubit(qb, t2=T2)
+        cX[i].add_qubit("A", t2=T2)
+        cX[i].add_qubit("M")
+
+        # Noise for the ancilla
+        cX[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+            "A",
+            time=0.,
+            px=P_X,
+            py=P_Y,
+            pz=P_Z
+        ))
+
+        # XX rotations between the qubits of the stabilizer and the ancilla
+        t = t_previous_circuit + TIME_2QUBIT_GATE/2.
+        for qb in stabilizer:
+            angle_XX = np.pi/4.
+            # Stark shift
+            cX[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cX[i].add_gate(qs.circuit.overZ(
+                "A",
+                time=t,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cX[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+4e-6,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cX[i].add_gate(qs.circuit.overZ(
+                "A",
+                time=t+4-6,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # XX rotation and overrotation
+            cX[i].add_gate(qs.circuit.XX(qb, "A", time=t+1e-6, chi=angle_XX))
+            cX[i].add_gate(qs.circuit.overXX(
+                qb,
+                "A",
+                time=t+2e-6,
+                theta=EPS*angle_XX,
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cX[i].add_gate(qs.circuit.TwoDepolarizingGate(
+                qb,
+                "A",
+                time=t+3e-6,
+                p=P2D
+            ))
+            t += TIME_2QUBIT_GATE
+
+        # -pi/2 X rotation on all code qubits
+        t = t_previous_circuit + 4.*TIME_2QUBIT_GATE + TIME_1QUBIT_GATE/2.
+
+        for qb in stabilizer:
+            angle_X = -np.pi/2.
+            # Stark shift
+            cX[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cX[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+5e-6,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # X rotation and overrotation
+            cX[i].add_gate(qs.circuit.RotateX(qb,time=t+2e-6,angle=angle_X))
+            cX[i].add_gate(qs.circuit.overX(
+                qb,
+                time=t+3e-6,
+                theta=EPS*angle_X,
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cX[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+                qb,
+                time=t+4e-6,
+                px=P_X,
+                py=P_Y,
+                pz=P_Z
+            ))
+            t += TIME_1QUBIT_GATE
+
+
+        t = t_previous_circuit + 4.*TIME_2QUBIT_GATE + 4.*TIME_1QUBIT_GATE
+
+        tmindict={
+            stabilizer[0]: t_previous_circuit,
+            stabilizer[1]: t_previous_circuit,
+            stabilizer[2]: t_previous_circuit,
+            stabilizer[3]: t_previous_circuit,
+            "A": 0.
+        }
+
+        tmaxdict={
+            stabilizer[0]: t,
+            stabilizer[1]: t,
+            stabilizer[2]: t,
+            stabilizer[3]: t,
+            "A": tEnd
+        }
+
+        cX[i].order()
+
+        cX[i].add_waiting_gates(
+            tmin=tmindict,
+            tmax=tmaxdict,
+            only_qubits=[
+                stabilizer[0], stabilizer[1],
+                stabilizer[2], stabilizer[3], "A"
+            ]
+        )
+
+        k = 0
+        if MEASURING_Z:
+            k = 3
+
+        sampler = qs.circuit.uniform_noisy_sampler(
+            readout_error=READOUT_ERROR,
+            seed=seeds[i+k]
+        )
+        cX[i].add_measurement("A", time=tEnd, sampler=sampler)
+
+        t_previous_circuit = t
+
+    t_XXXX_end = t_previous_circuit
+
+# YYYY Stabilizers
+# The measurement of a YYYY stabilizer corresponds to applying a Hadamard to the
+# ancilla, a controlled Y on all the measured qubits, and then another
+# Hadamard to the ancilla.
+# After using Maslov's compilation, and writing the Y basis change as +pi/2 Z
+# rotation followed by a +pi/2 X rotation, we can decompose the YYYY stabilizer
+# measurement into:
+# +pi/2 Z rotation applied to all qubits of the stabilizer
+# MS gates applied between all qubits of the stabilizer and the ancilla
+# -pi/2 X rotation applied to all qubits of the stabilizer
+# -pi/2 Z rotation applied to all qubits of the stabilizer
+
+if MEASURING_Y:
+    cY = []
+
+    if MEASURING_Z:
+        t_previous_circuit = t_ZZZZ_end
+
+    if MEASURING_X:
+        t_previous_circuit = t_XXXX_end
+
+    for stabilizer in stabilizers:
+        i = len(cY)
+
+        cY.append(qs.circuit.Circuit(
+            title="Y"+stabilizer[0]+stabilizer[1]+stabilizer[2]+stabilizer[3]
+        ))
+
+        for qb in code_qubits:
+            cY[i].add_qubit(qb, t2=T2)
+        cY[i].add_qubit("A", t2=T2)
+        cY[i].add_qubit("M")
+
+        # Noise for the ancilla
+        cY[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+            "A",
+            time=0.,
+            px=P_X,
+            py=P_Y,
+            pz=P_Z
+        ))
+
+        # +pi/2 Z rotation on all code qubits
+        t = t_previous_circuit + TIME_1QUBIT_GATE/2.
+
+        for qb in stabilizer:
+            angle_Z = np.pi/2.
+            # Stark shift
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+5e-6,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # X rotation and overrotation
+            cY[i].add_gate(qs.circuit.RotateZ(qb,time=t+2e-6,angle=angle_Z))
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+3e-6,
+                theta=EPS*angle_Z,
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cY[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+                qb,
+                time=t+4e-6,
+                px=P_X,
+                py=P_Y,
+                pz=P_Z
+            ))
+            t += TIME_1QUBIT_GATE
+
+        # XX rotations between the qubits of the stabilizer and the ancilla
+        t = t_previous_circuit + 4.*TIME_1QUBIT_GATE + TIME_2QUBIT_GATE/2.
+        for qb in stabilizer:
+            angle_XX = np.pi/4.
+            # Stark shift
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cY[i].add_gate(qs.circuit.overZ(
+                "A",
+                time=t,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+4e-6,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cY[i].add_gate(qs.circuit.overZ(
+                "A",
+                time=t+4-6,
+                theta=ETA*TIME_2QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # XX rotation and overrotation
+            cY[i].add_gate(qs.circuit.XX(qb, "A", time=t+1e-6, chi=angle_XX))
+            cY[i].add_gate(qs.circuit.overXX(
+                qb,
+                "A",
+                time=t+2e-6,
+                theta=EPS*angle_XX,
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cY[i].add_gate(qs.circuit.TwoDepolarizingGate(
+                qb,
+                "A",
+                time=t+3e-6,
+                p=P2D
+            ))
+            t += TIME_2QUBIT_GATE
+
+        # -pi/2 X rotation on all code qubits
+        t = ( t_previous_circuit + 4.*TIME_2QUBIT_GATE
+            + 4.*TIME_1QUBIT_GATE + TIME_1QUBIT_GATE/2. )
+
+        for qb in stabilizer:
+            angle_X = -np.pi/2.
+            # Stark shift
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+5e-6,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # X rotation and overrotation
+            cY[i].add_gate(qs.circuit.RotateX(qb,time=t+2e-6,angle=angle_X))
+            cY[i].add_gate(qs.circuit.overX(
+                qb,
+                time=t+3e-6,
+                theta=EPS*angle_X,
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cY[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+                qb,
+                time=t+4e-6,
+                px=P_X,
+                py=P_Y,
+                pz=P_Z
+            ))
+            t += TIME_1QUBIT_GATE
+
+        # -pi/2 Z rotation on all code qubits
+        t = ( t_previous_circuit + 4.*TIME_2QUBIT_GATE
+                + 8.*TIME_1QUBIT_GATE + TIME_1QUBIT_GATE/2. )
+
+        for qb in stabilizer:
+            angle_Z = -np.pi/2.
+            # Stark shift
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+5e-6,
+                theta=ETA*TIME_1QUBIT_GATE,
+                kappa=KAPPA
+            ))
+            # X rotation and overrotation
+            cY[i].add_gate(qs.circuit.RotateZ(qb,time=t+2e-6,angle=angle_Z))
+            cY[i].add_gate(qs.circuit.overZ(
+                qb,
+                time=t+3e-6,
+                theta=EPS*angle_Z,
+                kappa=KAPPA
+            ))
+            # Noise channel
+            cY[i].add_gate(qs.circuit.AsymmetricDepolarizingNoise(
+                qb,
+                time=t+4e-6,
+                px=P_X,
+                py=P_Y,
+                pz=P_Z
+            ))
+            t += TIME_1QUBIT_GATE
+
+        t = t_previous_circuit + 12.*TIME_2QUBIT_GATE + 4.*TIME_1QUBIT_GATE
+
+        tmindict={
+            stabilizer[0]: t_previous_circuit,
+            stabilizer[1]: t_previous_circuit,
+            stabilizer[2]: t_previous_circuit,
+            stabilizer[3]: t_previous_circuit,
+            "A": 0.
+        }
+
+        tmaxdict={
+            stabilizer[0]: t,
+            stabilizer[1]: t,
+            stabilizer[2]: t,
+            stabilizer[3]: t,
+            "A": tEnd
+        }
+
+        cY[i].order()
+
+        cY[i].add_waiting_gates(
+            tmin=tmindict,
+            tmax=tmaxdict,
+            only_qubits=[
+                stabilizer[0], stabilizer[1],
+                stabilizer[2], stabilizer[3], "A"
+            ]
+        )
+
+        sampler = qs.circuit.uniform_noisy_sampler(
+            readout_error=READOUT_ERROR,
+            seed=seeds[i+3]
+        )
+
+        cY[i].add_measurement("A", time=tEnd, sampler=sampler)
+
+        t_previous_circuit = t
+
+
+# A measurement circuit for each qubit
+m = []
+i = 0
+for qubit in code_qubits:
+    m.append(qs.circuit.Circuit(title="measurement " + qubit))
+    for qb in code_qubits:
+        m[i].add_qubit(qb)
+    m[i].add_qubit("M")
+    m[i].order()
+    sampler = qs.circuit.uniform_noisy_sampler(
+        # readout_error=READOUT_ERROR,
+        readout_error=0.,
+        seed=seeds[6+i]
+    )
+    m[i].add_measurement(qubit, time=tEnd, output_bit="M", sampler=sampler)
+    i += 1
+
+
+# Code preparation function
+
+def prep():
+    c.apply_to(sdm)
+    p.apply_to(sdm)
+
+# Syndrome measurements
+
+def update(sdm):
+
+    syndrome = ""
+
+    if MEASURING_Z:
+        for circuit in cZ:
+            sdm.classical["A"] = 0
+            circuit.apply_to(sdm)
+            syndrome += str(sdm.classical["A"])
+
+    if MEASURING_X:
+        for circuit in cX:
+            sdm.classical["A"] = 0
+            circuit.apply_to(sdm)
+            syndrome += str(sdm.classical["A"])
+
+    if MEASURING_Y:
+        for circuit in cY:
+            sdm.classical["A"] = 0
+            circuit.apply_to(sdm)
+            syndrome += str(sdm.classical["A"])
+
+    return syndrome
+
+
+number_of_errors = 0
+
+for testN in range(NUMBER_OF_RUNS):
+    sdm = qs.sparsedm.SparseDM(c.get_qubit_names())
+
+    prep()
+
+    syndrome = update(sdm)
+
+    # If the stabilizers detect any error, run the syndrome extraction again
+    # I don't know how if this is possible without messing the times of the gates
+    if syndrome != "000000":
+        syndrome = update(sdm)
+
+    error = lookup_table[syndrome]
+
+    # Decoder circuit
+
+    cc = qs.circuit.Circuit(title="corrector")
+    for qb in code_qubits:
+        cc.add_qubit(qb)
+
+    i = 1
+    for e in error:
+        if e == 'X':
+            cc.add_gate(qs.circuit.RotateX("D"+str(i), angle=np.pi, time=i))
+        if e == 'Y':
+            cc.add_gate(qs.circuit.RotateY("D"+str(i), angle=np.pi, time=i))
+        if e == 'Z':
+            cc.add_gate(qs.circuit.RotateZ("D"+str(i), angle=np.pi, time=i))
+        i += 1
+
+    cc.order()
+    cc.apply_to(sdm)
+
+    # Measurements of all qubits
+    dat = []
+    for circuit in m:
+        circuit.apply_to(sdm)
+        dat.append(sdm.classical["M"])
+
+    # These three parity checks check if we are in the code subspace
+    parity1 = (dat[0] + dat[1] + dat[2] + dat[3])%2
+    parity2 = (dat[4] + dat[1] + dat[2] + dat[5])%2
+    parity3 = (dat[6] + dat[2] + dat[3] + dat[5])%2
+
+    # This last parity check checks if we are in the |0> logical state
+    parity4 = (dat[0] + dat[1] + dat[2] + dat[3] + dat[4] + dat[5] + dat[6])%2
+
+    if (parity1 + parity2 + parity3 + parity4) > 1 :
+        number_of_errors += 1
+
+print( str(P_X) + "\t" + str(P_Y) + "\t" + str(P_Z) + "\t"
+          + str( number_of_errors/NUMBER_OF_RUNS ) )
