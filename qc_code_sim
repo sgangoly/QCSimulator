@@ -1,5 +1,5 @@
 # Nine qubit code simulator. Based on Leonardo & Dripto's code
-# Not assuming ion trap can do two gates at the same time
+# Not assuming ion trap can do two gates at the same time but hoping they can. Communicated with IonQ
 
 import numpy as np
 import sys
